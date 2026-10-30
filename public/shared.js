@@ -77,7 +77,7 @@
   // "Pay rent @fri 9:00 ^2026-11-05 -3d +1m !high"
   //   @date  scheduled      ^date  deadline      9:00 / 2pm  scheduled time
   //   +1w ++1w .+1d  repeat -3d / -1w  deadline warning period
-  //   !high !! !low  priority
+  //   !high !! !low  priority                      #tag  tag
   // Dates: today, tom(orrow), mon..sun, YYYY-MM-DD, MM-DD, +3d/+2w/+1m/+1y.
   const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
@@ -114,6 +114,12 @@
     return TIME_RE.test(t) ? t : null;
   }
 
+  // Tags are lowercase words starting with a letter: letters, digits, - _ / . (a leading # is dropped)
+  function normalizeTag(t) {
+    t = String(t).trim().replace(/^#+/, '').toLowerCase();
+    return /^\p{L}[\p{L}\p{N}_\-\/.]{0,39}$/u.test(t) ? t : '';
+  }
+
   function parseQuickAdd(text, today) {
     const out = {};
     const rest = [];
@@ -126,6 +132,7 @@
       else if (/^(!high|!!|!h)$/i.test(tok)) out.priority = 'high';
       else if (/^(!low|!l)$/i.test(tok)) out.priority = 'low';
       else if ((v = parseTimeWord(tok))) out.scheduled_time = v;
+      else if (tok[0] === '#' && tok.length > 1 && (v = normalizeTag(tok))) (out.tags ||= []).includes(v) || out.tags.push(v);
       else rest.push(tok);
     }
     out.title = rest.join(' ');
@@ -135,5 +142,5 @@
   }
 
   return { DATE_RE, TIME_RE, REPEAT_RE, localToday, isValidDate, addDays, addMonths, addInterval, diffDays,
-           parseRepeat, nextRepeat, occurrences, describeRepeat, parseQuickAdd };
+           parseRepeat, nextRepeat, occurrences, describeRepeat, normalizeTag, parseQuickAdd };
 });

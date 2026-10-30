@@ -38,7 +38,8 @@ function migrate() {
         created_at     TEXT NOT NULL,
         updated_at     TEXT NOT NULL,
         completed_at   TEXT,              -- last time it was completed (repeating tasks too)
-        repeat_count   INTEGER NOT NULL DEFAULT 0
+        repeat_count   INTEGER NOT NULL DEFAULT 0,
+        tags           TEXT NOT NULL DEFAULT '[]' -- JSON array of lowercase strings
       );`);
   } else if (version < 2) {
     // v1 had a single due_date/due_time; treat it as the scheduled date.
@@ -56,6 +57,8 @@ function migrate() {
       ALTER TABLE tasks DROP COLUMN due_time;
       COMMIT;`);
   }
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'tags'").get())
+    db.exec("ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'");
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tasks_sched ON tasks(scheduled_date);
     CREATE INDEX IF NOT EXISTS idx_tasks_deadline ON tasks(deadline_date);
@@ -67,19 +70,36 @@ function migrate() {
       deadline_date  TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_completions_task ON completions(task_id);
-    PRAGMA user_version = 2;`);
+    CREATE TABLE IF NOT EXISTS views (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      name     TEXT NOT NULL,
+      filters  TEXT NOT NULL DEFAULT '{}', -- JSON, see validateFilters
+      position INTEGER NOT NULL DEFAULT 0
+    );
+    PRAGMA user_version = 3;`);
 }
 
 const PRIORITIES = ['low', 'normal', 'high'];
-const FIELDS = ['title', 'notes', 'scheduled_date', 'scheduled_time', 'deadline_date', 'warning_days', 'repeat', 'priority', 'done'];
-const DEFAULTS = { notes: '', scheduled_date: null, scheduled_time: null, deadline_date: null, warning_days: null, repeat: null, priority: 'normal', done: false };
+const FIELDS = ['title', 'notes', 'scheduled_date', 'scheduled_time', 'deadline_date', 'warning_days', 'repeat', 'priority', 'done', 'tags'];
+const DEFAULTS = { notes: '', scheduled_date: null, scheduled_time: null, deadline_date: null, warning_days: null, repeat: null, priority: 'normal', done: false, tags: [] };
+const SCOPES = ['all', 'inbox', 'dated'];
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
 function toTask(row) {
-  return row && { ...row, done: !!row.done };
+  return row && { ...row, done: !!row.done, tags: JSON.parse(row.tags || '[]') };
+}
+
+// Accepts an array or a space/comma separated string; returns unique normalized tags.
+function parseTags(v, field = 'tags') {
+  if (v == null || v === '') return [];
+  const list = Array.isArray(v) ? v : typeof v === 'string' ? v.split(/[\s,]+/) : null;
+  if (!list || list.some(t => typeof t !== 'string')) throw new HttpError(400, `${field} must be an array of strings`);
+  const out = [...new Set(list.map(S.normalizeTag).filter(Boolean))];
+  if (out.length > 30) throw new HttpError(400, `too many ${field}`);
+  return out;
 }
 
 // The date "today" is relative to: ?today=YYYY-MM-DD from the client, else the server's local date (TZ).
@@ -129,7 +149,56 @@ function validate(body, partial) {
     if (typeof body.done !== 'boolean') throw new HttpError(400, 'done must be a boolean');
     out.done = body.done;
   }
+  if ('tags' in body) out.tags = parseTags(body.tags);
   return out;
+}
+
+// ---- Filters (shared by task lists, the agenda and saved views) ----
+// tags: match any of them; exclude_tags: match none; priority: any of; q: text; scope: all | inbox | dated
+function validateFilters(f) {
+  if (!f || typeof f !== 'object' || Array.isArray(f)) throw new HttpError(400, 'filters must be an object');
+  const out = {};
+  if (f.tags != null) out.tags = parseTags(f.tags, 'tags');
+  if (f.exclude_tags != null) out.exclude_tags = parseTags(f.exclude_tags, 'exclude_tags');
+  if (f.priority != null) {
+    const p = Array.isArray(f.priority) ? f.priority : String(f.priority).split(',').filter(Boolean);
+    if (p.some(x => !PRIORITIES.includes(x))) throw new HttpError(400, `priority must be any of ${PRIORITIES.join(', ')}`);
+    out.priority = [...new Set(p)];
+  }
+  if (f.q != null && f.q !== '') {
+    if (typeof f.q !== 'string') throw new HttpError(400, 'q must be a string');
+    out.q = f.q.slice(0, 200);
+  }
+  if (f.scope != null && f.scope !== 'all') {
+    if (!SCOPES.includes(f.scope)) throw new HttpError(400, `scope must be one of ${SCOPES.join(', ')}`);
+    out.scope = f.scope;
+  }
+  for (const k of ['tags', 'exclude_tags', 'priority']) if (out[k] && !out[k].length) delete out[k];
+  return out;
+}
+
+// Filters from query params: tag=a,b  not_tag=c  priority=high,normal  q=text  scope=inbox  view=<id>
+function filtersFromQuery(q) {
+  let f = {};
+  if (q.view) {
+    const v = db.prepare('SELECT filters FROM views WHERE id = ?').get(Number(q.view));
+    if (!v) throw new HttpError(404, 'view not found');
+    f = JSON.parse(v.filters);
+  }
+  const extra = validateFilters({ tags: q.tag, exclude_tags: q.not_tag, priority: q.priority, q: q.q, scope: q.scope });
+  return { ...f, ...extra };
+}
+
+function filterSql(f) {
+  const where = [], params = [];
+  const inList = a => a.map(() => '?').join(', ');
+  if (f.tags) { where.push(`EXISTS (SELECT 1 FROM json_each(tasks.tags) WHERE value IN (${inList(f.tags)}))`); params.push(...f.tags); }
+  if (f.exclude_tags) { where.push(`NOT EXISTS (SELECT 1 FROM json_each(tasks.tags) WHERE value IN (${inList(f.exclude_tags)}))`); params.push(...f.exclude_tags); }
+  if (f.priority) { where.push(`priority IN (${inList(f.priority)})`); params.push(...f.priority); }
+  if (f.q) { where.push('(title LIKE ? OR notes LIKE ?)'); params.push(`%${f.q}%`, `%${f.q}%`); }
+  if (f.scope === 'inbox') where.push('scheduled_date IS NULL AND deadline_date IS NULL');
+  if (f.scope === 'dated') where.push('(scheduled_date IS NOT NULL OR deadline_date IS NOT NULL)');
+  return { where, params };
 }
 
 const getStmt = db.prepare('SELECT * FROM tasks WHERE id = ?');
@@ -162,6 +231,12 @@ function apply(existing, t, today) {
   return { next, completion };
 }
 
+function dbValue(k, v) {
+  if (k === 'tags') return JSON.stringify(v || []);
+  if (k === 'repeat_count') return v ?? 0;
+  return v ?? null;
+}
+
 function save(id, next, completion) {
   const cols = [...FIELDS, 'updated_at', 'completed_at', 'repeat_count'];
   db.exec('BEGIN');
@@ -169,10 +244,10 @@ function save(id, next, completion) {
     if (id == null) {
       cols.push('created_at');
       const r = db.prepare(`INSERT INTO tasks (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
-        .run(...cols.map(k => next[k] ?? (k === 'repeat_count' ? 0 : null)));
+        .run(...cols.map(k => dbValue(k, next[k])));
       id = Number(r.lastInsertRowid);
     } else {
-      db.prepare(`UPDATE tasks SET ${cols.map(k => `${k} = ?`).join(', ')} WHERE id = ?`).run(...cols.map(k => next[k] ?? (k === 'repeat_count' ? 0 : null)), id);
+      db.prepare(`UPDATE tasks SET ${cols.map(k => `${k} = ?`).join(', ')} WHERE id = ?`).run(...cols.map(k => dbValue(k, next[k])), id);
     }
     if (completion) db.prepare('INSERT INTO completions (task_id, done_at, scheduled_date, deadline_date) VALUES (?, ?, ?, ?)')
       .run(id, next.completed_at, completion.scheduled_date, completion.deadline_date);
@@ -198,8 +273,7 @@ function updateTask(id, body, partial, today) {
 }
 
 function listTasks(q) {
-  const where = [];
-  const params = [];
+  const { where, params } = filterSql(filtersFromQuery(q));
   for (const k of ['from', 'to']) if (q[k] && !S.isValidDate(q[k])) throw new HttpError(400, `${k} must be YYYY-MM-DD`);
   if (q.from || q.to) {
     // A task matches if its scheduled date or its deadline falls in the range
@@ -211,7 +285,6 @@ function listTasks(q) {
   if (q.undated === 'true' || q.inbox === 'true') where.push('scheduled_date IS NULL AND deadline_date IS NULL');
   if (q.inbox === 'true') where.push('done = 0');
   if (q.repeating === 'true') where.push('repeat IS NOT NULL');
-  if (q.q) { where.push('(title LIKE ? OR notes LIKE ?)'); params.push(`%${q.q}%`, `%${q.q}%`); }
   const sql = `SELECT * FROM tasks ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
     ORDER BY done, COALESCE(MIN(scheduled_date, deadline_date), scheduled_date, deadline_date) IS NULL,
              COALESCE(MIN(scheduled_date, deadline_date), scheduled_date, deadline_date), scheduled_time IS NULL, scheduled_time,
@@ -225,7 +298,7 @@ function listTasks(q) {
 //  - deadlines that day (including future repeats)
 //  - on today only: unfinished tasks scheduled in the past ("carried", with days since),
 //    and deadlines within their warning period or overdue.
-function agenda(from, to, today) {
+function agenda(from, to, today, filters = {}) {
   if (!S.isValidDate(from) || !S.isValidDate(to)) throw new HttpError(400, 'from and to must be YYYY-MM-DD');
   if (to < from || S.diffDays(from, to) > 366) throw new HttpError(400, 'range must be 0-366 days');
   const days = new Map();
@@ -237,7 +310,9 @@ function agenda(from, to, today) {
     if (!prev || (entry.kind === 'deadline' && prev.kind !== 'deadline')) day.set(task.id, { ...entry, kind: entry.kind, task });
   };
 
-  for (const task of db.prepare('SELECT * FROM tasks WHERE scheduled_date IS NOT NULL OR deadline_date IS NOT NULL').all().map(toTask)) {
+  const fw = filterSql(filters);
+  const rows = db.prepare(`SELECT * FROM tasks WHERE (scheduled_date IS NOT NULL OR deadline_date IS NOT NULL)${fw.where.map(w => ' AND ' + w).join('')}`).all(...fw.params);
+  for (const task of rows.map(toTask)) {
     const { scheduled_date: sd, deadline_date: dd } = task;
     if (sd) {
       put(sd, task, { kind: 'scheduled', carried: false, days: 0 });
@@ -266,6 +341,23 @@ function agenda(from, to, today) {
     rank[e.task.priority], e.task.id];
   const cmp = (a, b) => { const x = order(a), y = order(b); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1; return 0; };
   return { today, from, to, days: [...days].map(([date, m]) => ({ date, items: [...m.values()].sort(cmp) })) };
+}
+
+// ---- Saved views ----
+function toView(row) { return row && { ...row, filters: JSON.parse(row.filters) }; }
+function validateView(body, partial) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'body must be a JSON object');
+  const out = {};
+  if ('name' in body || !partial) {
+    if (typeof body.name !== 'string' || !body.name.trim()) throw new HttpError(400, 'name is required');
+    out.name = body.name.trim().slice(0, 60);
+  }
+  if ('filters' in body || !partial) out.filters = validateFilters(body.filters ?? {});
+  if ('position' in body) {
+    if (!Number.isInteger(body.position)) throw new HttpError(400, 'position must be an integer');
+    out.position = body.position;
+  }
+  return out;
 }
 
 // ---- iCalendar feed: subscribe from a phone/desktop calendar app ----
@@ -383,7 +475,36 @@ async function handle(req, res) {
     const today = todayFrom(url);
     const from = url.searchParams.get('from') || today;
     const to = url.searchParams.get('to') || S.addDays(from, 6);
-    return send(res, 200, agenda(from, to, today));
+    return send(res, 200, agenda(from, to, today, filtersFromQuery(Object.fromEntries(url.searchParams))));
+  }
+
+  if (pathname === '/api/tags' && req.method === 'GET')
+    return send(res, 200, db.prepare(`SELECT value AS tag, COUNT(*) AS count, SUM(done = 0) AS open
+      FROM tasks, json_each(tasks.tags) GROUP BY value ORDER BY open DESC, value`).all());
+
+  if (pathname === '/api/views') {
+    if (req.method === 'GET') return send(res, 200, db.prepare('SELECT * FROM views ORDER BY position, id').all().map(toView));
+    if (req.method === 'POST') {
+      const v = validateView(await readJson(req), false);
+      const pos = db.prepare('SELECT COALESCE(MAX(position), 0) + 1 AS p FROM views').get().p;
+      const r = db.prepare('INSERT INTO views (name, filters, position) VALUES (?, ?, ?)').run(v.name, JSON.stringify(v.filters || {}), v.position ?? pos);
+      return send(res, 201, toView(db.prepare('SELECT * FROM views WHERE id = ?').get(r.lastInsertRowid)));
+    }
+    return send(res, 405, { error: 'method not allowed' });
+  }
+  const vm = pathname.match(/^\/api\/views\/(\d+)$/);
+  if (vm) {
+    const id = Number(vm[1]);
+    const existing = db.prepare('SELECT * FROM views WHERE id = ?').get(id);
+    if (!existing) return send(res, 404, { error: 'view not found' });
+    if (req.method === 'GET') return send(res, 200, toView(existing));
+    if (req.method === 'PATCH' || req.method === 'PUT') {
+      const v = { ...toView(existing), ...validateView(await readJson(req), req.method === 'PATCH') };
+      db.prepare('UPDATE views SET name = ?, filters = ?, position = ? WHERE id = ?').run(v.name, JSON.stringify(v.filters), v.position, id);
+      return send(res, 200, toView(db.prepare('SELECT * FROM views WHERE id = ?').get(id)));
+    }
+    if (req.method === 'DELETE') { db.prepare('DELETE FROM views WHERE id = ?').run(id); return send(res, 204); }
+    return send(res, 405, { error: 'method not allowed' });
   }
 
   let m = pathname.match(/^\/api\/tasks\/(\d+)\/completions$/);

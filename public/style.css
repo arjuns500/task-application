@@ -120,3 +120,39 @@ fieldset.repeat select, fieldset.repeat input { padding: 10px; border: 1px solid
 
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(92px + env(safe-area-inset-bottom)); z-index: 20;
          background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-size: 14px; box-shadow: 0 4px 12px rgb(0 0 0 / .25); max-width: calc(100vw - 32px); }
+
+/* ---- Tags & views ---- */
+.views { max-width: 760px; margin: 0 auto; padding: 10px 16px 0; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.views::-webkit-scrollbar { display: none; }
+.views button { flex: none; border: 1px solid var(--border); background: var(--surface); color: var(--muted); border-radius: 999px; padding: 5px 12px; font-size: 14px; }
+.views button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.views button.edit, .views button.add { color: var(--muted); }
+.tagchip { font-size: 12px; border-radius: 6px; padding: 0 6px; white-space: nowrap;
+           background: hsl(var(--h) 70% 92%); color: hsl(var(--h) 60% 30%); }
+@media (prefers-color-scheme: dark) { .tagchip { background: hsl(var(--h) 40% 22%); color: hsl(var(--h) 70% 80%); } }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips:empty { display: none; }
+.chips button { border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: 999px; padding: 3px 10px; font-size: 13px; }
+.chips button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chips button.off { background: var(--danger); border-color: var(--danger); color: #fff; text-decoration: line-through; }
+#tag-suggest { margin-top: -6px; }
+#view-form { display: flex; flex-direction: column; gap: 12px; padding: 20px; }
+#view-form h2 { margin: 0; font-size: 18px; }
+#view-form label, #view-form .field > span { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+#view-form .field { display: flex; flex-direction: column; gap: 6px; }
+#view-form .field small { font-size: 12px; }
+#view-form input:not([type=checkbox]), #view-form select { padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); font-size: 16px; width: 100%; color: var(--text); }
+#view-form .checks { display: flex; gap: 16px; }
+#view-form label.check { flex-direction: row; align-items: center; gap: 6px; font-size: 15px; color: var(--text); }
+
+/* ---- Wide calendar on desktop ---- */
+@media (min-width: 900px) {
+  body.wide main, body.wide .quick, body.wide .views { max-width: 1400px; }
+  body.wide .help { max-width: 1368px; }
+  body.wide .cal-grid { gap: 4px; }
+  body.wide .day { min-height: 140px; padding: 6px; cursor: pointer; }
+  body.wide .day .pill { font-size: 12px; padding: 2px 6px; cursor: pointer; }
+  body.wide .day .pill:hover { filter: brightness(.95); }
+  body.wide .day .pill .t { color: var(--muted); margin-right: 4px; font-variant-numeric: tabular-nums; }
+  body.wide .day .more { font-size: 12px; padding: 0 2px; }
+}

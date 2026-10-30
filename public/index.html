@@ -29,9 +29,11 @@
     <b>@date</b> scheduled &nbsp; <b>^date</b> deadline &nbsp; <b>9:30</b>/<b>2pm</b> time<br>
     dates: today, tom, mon…sun, 11-05, 2026-11-05, +3d, +2w<br>
     <b>+1w</b> repeat &nbsp; <b>++1w</b> next future &nbsp; <b>.+1d</b> after done &nbsp; (d, w, m, y)<br>
-    <b>-3d</b> deadline warning &nbsp; <b>!high</b> / <b>!!</b> / <b>!low</b> priority<br>
-    No date = goes to the Inbox.
+    <b>-3d</b> deadline warning &nbsp; <b>!high</b> / <b>!!</b> / <b>!low</b> priority &nbsp; <b>#tag</b> tag<br>
+    No date = goes to the Inbox. In a view with one tag, new tasks get that tag.
   </div>
+
+  <nav id="views" class="views" aria-label="Saved views"></nav>
 
   <main>
     <section id="view-agenda" class="view">
@@ -50,10 +52,16 @@
         <button id="cal-next" aria-label="Next month">›</button>
         <button id="cal-today" class="link">Today</button>
       </div>
-      <div class="cal-grid cal-dow"></div>
-      <div id="cal" class="cal-grid"></div>
-      <h3 id="day-title"></h3>
-      <div id="day-list"></div>
+      <div class="cal-layout">
+        <div>
+          <div class="cal-grid cal-dow"></div>
+          <div id="cal" class="cal-grid"></div>
+        </div>
+        <div>
+          <h3 id="day-title"></h3>
+          <div id="day-list"></div>
+        </div>
+      </div>
     </section>
   </main>
 
@@ -97,12 +105,48 @@
           <option value="high">High</option>
         </select>
       </label>
+      <label>Tags <input name="tags" placeholder="work errands" autocomplete="off" autocapitalize="none"></label>
+      <div id="tag-suggest" class="chips"></div>
       <label>Notes <textarea name="notes" rows="4"></textarea></label>
       <label class="check"><input name="done" type="checkbox"> Done</label>
       <div class="actions">
         <button type="button" id="delete" class="danger">Delete</button>
         <span class="spacer"></span>
         <button type="button" id="cancel">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="view-editor">
+    <form method="dialog" id="view-form">
+      <h2 id="view-form-title">New view</h2>
+      <label>Name <input name="name" required maxlength="60" autocomplete="off"></label>
+      <div class="field">
+        <span>Tags <small>tap once to include, twice to exclude</small></span>
+        <div id="view-tags" class="chips"></div>
+        <input name="new_tag" placeholder="Add a tag not used yet" autocomplete="off" autocapitalize="none">
+      </div>
+      <div class="field">
+        <span>Priority</span>
+        <div class="checks">
+          <label class="check"><input type="checkbox" name="p_high"> High</label>
+          <label class="check"><input type="checkbox" name="p_normal"> Normal</label>
+          <label class="check"><input type="checkbox" name="p_low"> Low</label>
+        </div>
+      </div>
+      <label>Show
+        <select name="scope">
+          <option value="all">All tasks</option>
+          <option value="dated">Only scheduled or with a deadline</option>
+          <option value="inbox">Only the Inbox (no dates)</option>
+        </select>
+      </label>
+      <label>Text contains <input name="q" autocomplete="off"></label>
+      <div class="actions">
+        <button type="button" id="view-delete" class="danger">Delete</button>
+        <span class="spacer"></span>
+        <button type="button" id="view-cancel">Cancel</button>
         <button type="submit" class="primary">Save</button>
       </div>
     </form>

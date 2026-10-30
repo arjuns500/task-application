@@ -157,3 +157,37 @@ test('migrates a v1 database', async () => {
     assert.ok(!('due_date' in t));
   } finally { p.kill(); fs.rmSync(d, { recursive: true, force: true }); }
 });
+
+test('tags, filters and saved views', async () => {
+  const mk = async b => (await req('POST', '/api/tasks', b)).body;
+  const a = await mk({ title: 'tv-a', tags: ['Work', '#urgent'], scheduled_date: '2028-01-03' });
+  await mk({ title: 'tv-b', tags: 'home errands', priority: 'high' });
+  await mk({ title: 'tv-c', tags: ['work'], priority: 'low', deadline_date: '2028-01-04' });
+  assert.deepStrictEqual(a.tags, ['work', 'urgent']);
+  assert.strictEqual((await req('POST', '/api/tasks', { title: 'x', tags: [1] })).status, 400);
+
+  const titles = async q => (await req('GET', '/api/tasks?q=tv-&' + q)).body.map(t => t.title).sort();
+  assert.deepStrictEqual(await titles('tag=work'), ['tv-a', 'tv-c']);
+  assert.deepStrictEqual(await titles('tag=work,home'), ['tv-a', 'tv-b', 'tv-c']);
+  assert.deepStrictEqual(await titles('tag=work&not_tag=urgent'), ['tv-c']);
+  assert.deepStrictEqual(await titles('priority=high,low'), ['tv-b', 'tv-c']);
+  assert.deepStrictEqual(await titles('scope=inbox'), ['tv-b']);
+
+  let r = await req('POST', '/api/views', { name: 'Work', filters: { tags: ['work'], exclude_tags: ['urgent'] } });
+  assert.strictEqual(r.status, 201);
+  const view = r.body;
+  assert.deepStrictEqual(await titles(`view=${view.id}`), ['tv-c']);
+  r = await req('GET', `/api/agenda?view=${view.id}&from=2028-01-01&to=2028-01-07&today=2028-01-01`);
+  assert.deepStrictEqual(r.body.days.flatMap(d => d.items.map(e => e.task.title)), ['tv-c', 'tv-c']); // warning on today + deadline day
+  r = await req('PATCH', `/api/views/${view.id}`, { filters: { tags: ['home'] } });
+  assert.deepStrictEqual(r.body.filters, { tags: ['home'] });
+  assert.strictEqual(r.body.name, 'Work');
+  assert.strictEqual((await req('POST', '/api/views', { name: 'bad', filters: { scope: 'nope' } })).status, 400);
+  assert.strictEqual((await req('GET', '/api/tasks?view=9999')).status, 404);
+  r = await req('GET', '/api/views');
+  assert.strictEqual(r.body.length, 1);
+  assert.strictEqual((await req('DELETE', `/api/views/${view.id}`)).status, 204);
+
+  r = await req('GET', '/api/tags');
+  assert.deepStrictEqual(r.body.find(t => t.tag === 'work'), { tag: 'work', count: 2, open: 2 });
+});

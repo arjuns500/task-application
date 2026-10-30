@@ -5,8 +5,9 @@ A small self-hosted task manager with a calendar view and a REST API.
 - **Zero dependencies.** Node 22's built-in HTTP server and SQLite (`node:sqlite`). One container, one database file.
 - **Org-mode style scheduling.** Each task can have a *scheduled* date (when to start; it keeps showing on today until done), a *deadline* (shown early, inside a warning period), and a *repeater* (`+1w`, `++1w`, `.+1d`).
 - **Agenda view.** Today plus the next 6 days, with overdue scheduled items carried forward and approaching deadlines, then the unscheduled Inbox.
+- **Tags and saved views.** Tag tasks (`#work`), then save filter combinations (tags to include/exclude, priority, text, inbox/dated) as views. The selected view applies to the Agenda, List and Calendar alike.
 - **Quick-add capture** bar with inline syntax, and a `/api/capture` endpoint for phone shortcuts.
-- **Mobile-friendly web UI** with Agenda, List and month Calendar views. Can be added to your phone's home screen.
+- **Mobile-friendly web UI** with Agenda, List and month Calendar views. On a desktop the calendar goes wide and lists each day's tasks in the cell (click one to edit it). Can be added to your phone's home screen.
 - **REST API** for scripts, shortcuts and other apps.
 - **Calendar feed** at `/calendar.ics` (scheduled items, deadlines, repeats as RRULEs) for Apple/Google/Outlook calendar.
 
@@ -36,8 +37,21 @@ Pay rent @fri ^11-05 -3d +1m !high
 | `+1w` `++1w` `.+1d` | repeater (scheduled today if no date) |
 | `-3d`, `-1w` | deadline warning period |
 | `!high` / `!!` / `!low` | priority |
+| `#tag` | tag (must start with a letter, so `#123` stays in the title) |
 
-Dates: `today`, `tom`, `mon`…`sun` (the next one), `11-05`, `2026-11-05`, `+3d`, `+2w`, `+1m`. Anything without a date lands in the **Inbox**. In the calendar view, an undated capture goes on the selected day.
+Dates: `today`, `tom`, `mon`…`sun` (the next one), `11-05`, `2026-11-05`, `+3d`, `+2w`, `+1m`. Anything without a date lands in the **Inbox**. In the calendar view, an undated capture goes on the selected day. While a view with exactly one tag is selected, new tasks get that tag.
+
+## Views
+
+A view is a saved filter. Pick it from the chips under the quick-add box; it stays selected as you switch between Agenda, List and Calendar (and across reloads). Filters:
+
+| Filter | Meaning |
+|--------|---------|
+| `tags` | task has **any** of these tags |
+| `exclude_tags` | task has **none** of these tags |
+| `priority` | any of `high`, `normal`, `low` |
+| `q` | title or notes contain this text |
+| `scope` | `all`, `dated` (scheduled or with a deadline), or `inbox` (no dates) |
 
 From an iOS Shortcut or Android HTTP Shortcuts app: `POST /api/capture` with a plain-text body (or `{"text": "..."}`).
 
@@ -74,28 +88,33 @@ A task looks like:
   "id": 1, "title": "Pay rent", "notes": "",
   "scheduled_date": "2026-11-01", "scheduled_time": null,
   "deadline_date": "2026-11-05", "warning_days": 3, "repeat": "+1m",
-  "priority": "high", "done": false, "repeat_count": 4,
+  "priority": "high", "done": false, "repeat_count": 4, "tags": ["home", "bills"],
   "created_at": "...", "updated_at": "...", "completed_at": "..."
 }
 ```
 
-Dates are `YYYY-MM-DD`, times `HH:MM`; all optional. `priority` is `low`, `normal` or `high`.
+`tags` is an array of lowercase strings (a space-separated string is also accepted). Dates are `YYYY-MM-DD`, times `HH:MM`; all optional. `priority` is `low`, `normal` or `high`.
 
 "Today" for the agenda and for repeats is taken from `?today=YYYY-MM-DD` when given (the web UI always sends the phone's date), otherwise the server's local date, so set `TZ` in `docker-compose.yml`.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| `GET`    | `/api/tasks` | Filters: `from`, `to` (scheduled or deadline in range), `done=true\|false`, `inbox=true`, `repeating=true`, `q` (text search) |
+| `GET`    | `/api/tasks` | Filters: `from`, `to` (scheduled or deadline in range), `done=true\|false`, `inbox=true`, `repeating=true`, plus the view filters below |
 | `POST`   | `/api/tasks` | `title` required |
 | `POST`   | `/api/capture` | Quick-add text, parsed as above |
 | `GET`    | `/api/agenda` | `from`, `to` (default: today + 6 days). Days with entries `{kind: scheduled\|deadline, carried, days, task}` |
 | `GET`    | `/api/tasks/:id/completions` | Completion history |
+| `GET`    | `/api/tags` | Tags in use, with total and open counts |
+| `GET` `POST` | `/api/views` | List / create views: `{"name": "Work", "filters": {"tags": ["work"]}}` |
+| `GET` `PATCH` `PUT` `DELETE` | `/api/views/:id` | |
 | `GET`    | `/api/tasks/:id` | |
 | `PATCH`  | `/api/tasks/:id` | Change only the fields you send; `{"done": true}` completes (or advances a repeating task) |
 | `PUT`    | `/api/tasks/:id` | Replace the task; omitted fields reset to defaults |
 | `DELETE` | `/api/tasks/:id` | |
 | `GET`    | `/calendar.ics` | iCalendar feed of dated tasks |
 | `GET`    | `/api/health` | Health check |
+
+`/api/tasks` and `/api/agenda` accept view filters as query parameters: `view=<id>` (a saved view), and/or `tag=a,b`, `not_tag=c`, `priority=high,normal`, `q=text`, `scope=inbox|dated`.
 
 Examples:
 
@@ -105,7 +124,7 @@ curl -X POST http://tasks:8080/api/tasks -H 'Content-Type: application/json' \
 
 curl -X POST http://tasks:8080/api/capture -d 'Call dentist @mon 10am !high'
 
-curl http://tasks:8080/api/agenda
+curl 'http://tasks:8080/api/agenda?tag=work'
 
 curl -X PATCH http://tasks:8080/api/tasks/3 -H 'Content-Type: application/json' -d '{"done":true}'
 ```

@@ -35,3 +35,11 @@ test('quick-add parsing', () => {
   assert.deepStrictEqual(S.parseQuickAdd('Email bob@example.com about @home 3 things', today),
     { title: 'Email bob@example.com about @home 3 things' });
 });
+
+test('tags', () => {
+  assert.strictEqual(S.normalizeTag('#Work'), 'work');
+  assert.strictEqual(S.normalizeTag('home/garden'), 'home/garden');
+  assert.strictEqual(S.normalizeTag('123'), '');
+  assert.deepStrictEqual(S.parseQuickAdd('Fix bug #123 #work #Work #errands', '2026-10-30'),
+    { title: 'Fix bug #123', tags: ['work', 'errands'] });
+});
