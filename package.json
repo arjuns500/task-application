@@ -1,0 +1,12 @@
+{
+  "name": "tasks",
+  "version": "0.1.0",
+  "description": "Self-hosted task manager with a calendar and REST API",
+  "private": true,
+  "main": "server.js",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,13 @@
+services:
+  tasks:
+    build: .
+    container_name: tasks
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      - TZ=${TZ:-UTC}
+      # Optional: require a bearer token for the API and UI
+      # - API_TOKEN=change-me

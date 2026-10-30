@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#2563eb">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Tasks</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Tasks</h1>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-view="list" class="active">List</button>
+      <button role="tab" data-view="calendar">Calendar</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="view-list" class="view">
+      <input id="search" type="search" placeholder="Search tasks" autocomplete="off">
+      <div id="list"></div>
+    </section>
+
+    <section id="view-calendar" class="view" hidden>
+      <div class="cal-head">
+        <button id="cal-prev" aria-label="Previous month">‹</button>
+        <h2 id="cal-title"></h2>
+        <button id="cal-next" aria-label="Next month">›</button>
+        <button id="cal-today" class="link">Today</button>
+      </div>
+      <div class="cal-grid cal-dow"></div>
+      <div id="cal" class="cal-grid"></div>
+      <h3 id="day-title"></h3>
+      <div id="day-list"></div>
+    </section>
+  </main>
+
+  <button id="add" class="fab" aria-label="Add task">+</button>
+
+  <dialog id="editor">
+    <form method="dialog" id="form">
+      <h2 id="form-title">New task</h2>
+      <label>Title <input name="title" required maxlength="500" autocomplete="off"></label>
+      <div class="row">
+        <label>Date <input name="due_date" type="date"></label>
+        <label>Time <input name="due_time" type="time"></label>
+      </div>
+      <label>Priority
+        <select name="priority">
+          <option value="low">Low</option>
+          <option value="normal" selected>Normal</option>
+          <option value="high">High</option>
+        </select>
+      </label>
+      <label>Notes <textarea name="notes" rows="4"></textarea></label>
+      <label class="check"><input name="done" type="checkbox"> Done</label>
+      <div class="actions">
+        <button type="button" id="delete" class="danger">Delete</button>
+        <span class="spacer"></span>
+        <button type="button" id="cancel">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
