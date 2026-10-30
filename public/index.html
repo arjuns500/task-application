@@ -14,13 +14,31 @@
   <header class="top">
     <h1>Tasks</h1>
     <nav class="tabs" role="tablist">
-      <button role="tab" data-view="list" class="active">List</button>
+      <button role="tab" data-view="agenda" class="active">Agenda</button>
+      <button role="tab" data-view="list">List</button>
       <button role="tab" data-view="calendar">Calendar</button>
     </nav>
   </header>
 
+  <form id="quick" class="quick" autocomplete="off">
+    <input id="quick-input" placeholder="Quick add: Pay rent @fri ^11-05 +1m !high" enterkeyhint="done" aria-label="Quick add">
+    <div id="quick-preview" class="quick-preview" hidden></div>
+    <button type="button" id="quick-help" class="quick-help" aria-label="Quick add syntax">?</button>
+  </form>
+  <div id="help" class="help" hidden>
+    <b>@date</b> scheduled &nbsp; <b>^date</b> deadline &nbsp; <b>9:30</b>/<b>2pm</b> time<br>
+    dates: today, tom, mon…sun, 11-05, 2026-11-05, +3d, +2w<br>
+    <b>+1w</b> repeat &nbsp; <b>++1w</b> next future &nbsp; <b>.+1d</b> after done &nbsp; (d, w, m, y)<br>
+    <b>-3d</b> deadline warning &nbsp; <b>!high</b> / <b>!!</b> / <b>!low</b> priority<br>
+    No date = goes to the Inbox.
+  </div>
+
   <main>
-    <section id="view-list" class="view">
+    <section id="view-agenda" class="view">
+      <div id="agenda"></div>
+    </section>
+
+    <section id="view-list" class="view" hidden>
       <input id="search" type="search" placeholder="Search tasks" autocomplete="off">
       <div id="list"></div>
     </section>
@@ -46,9 +64,32 @@
       <h2 id="form-title">New task</h2>
       <label>Title <input name="title" required maxlength="500" autocomplete="off"></label>
       <div class="row">
-        <label>Date <input name="due_date" type="date"></label>
-        <label>Time <input name="due_time" type="time"></label>
+        <label>Scheduled <input name="scheduled_date" type="date"></label>
+        <label>Time <input name="scheduled_time" type="time"></label>
       </div>
+      <div class="row">
+        <label>Deadline <input name="deadline_date" type="date"></label>
+        <label>Warn days before <input name="warning_days" type="number" min="0" max="365" inputmode="numeric" placeholder="14"></label>
+      </div>
+      <fieldset class="repeat">
+        <legend>Repeat</legend>
+        <div class="row">
+          <select name="repeat_mode" aria-label="Repeat mode">
+            <option value="">Never</option>
+            <option value="+">Every interval from the date (+)</option>
+            <option value="++">Every interval, skip missed (++)</option>
+            <option value=".+">Interval after completing (.+)</option>
+          </select>
+          <input name="repeat_n" type="number" min="1" max="999" value="1" inputmode="numeric" aria-label="Interval">
+          <select name="repeat_unit" aria-label="Unit">
+            <option value="d">days</option>
+            <option value="w" selected>weeks</option>
+            <option value="m">months</option>
+            <option value="y">years</option>
+          </select>
+        </div>
+      </fieldset>
+      <p id="history" class="history" hidden></p>
       <label>Priority
         <select name="priority">
           <option value="low">Low</option>
@@ -67,6 +108,9 @@
     </form>
   </dialog>
 
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="shared.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
