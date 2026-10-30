@@ -10,6 +10,7 @@ A small self-hosted task manager with a calendar view and a REST API.
 - **Mobile-friendly web UI** with Agenda, List and month Calendar views. On a desktop the calendar goes wide and lists each day's tasks in the cell (click one to edit it). Can be added to your phone's home screen.
 - **REST API** for scripts, shortcuts and other apps.
 - **Calendar feed** at `/calendar.ics` (scheduled items, deadlines, repeats as RRULEs) for Apple/Google/Outlook calendar.
+- **Terminal client** in [`tui/`](tui/README.md): a full-screen TUI that keeps a local copy, works offline and syncs with the server.
 
 ## Scheduling, deadlines and repeats
 

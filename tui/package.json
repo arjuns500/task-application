@@ -1,0 +1,9 @@
+{
+  "name": "tasks-tui",
+  "version": "0.1.0",
+  "description": "Terminal client for Tasks that keeps a local copy and syncs with the server",
+  "private": true,
+  "bin": { "tasks-tui": "tasks-tui.js" },
+  "engines": { "node": ">=22.13" },
+  "scripts": { "test": "node --test test/" }
+}
