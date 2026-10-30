@@ -1,6 +1,7 @@
 // Local copy of the tasks plus an outbox of changes not yet sent to the server.
 // Tasks created offline get negative ids until the server assigns a real one.
 'use strict';
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
@@ -12,7 +13,8 @@ class Store {
     this.db = new DatabaseSync(file);
     this.db.exec(`
       PRAGMA journal_mode = WAL;
-      CREATE TABLE IF NOT EXISTS tasks  (id INTEGER PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS tasks  (id INTEGER PRIMARY KEY, data TEXT NOT NULL); -- your copy, with local edits
+      CREATE TABLE IF NOT EXISTS server (id INTEGER PRIMARY KEY, data TEXT NOT NULL); -- the server's, as of the last sync
       CREATE TABLE IF NOT EXISTS outbox (
         seq      INTEGER PRIMARY KEY AUTOINCREMENT,
         kind     TEXT NOT NULL,              -- create | update | complete | delete
@@ -30,6 +32,7 @@ class Store {
 
   // ---- reads ----
   all() { return this.db.prepare('SELECT data FROM tasks').all().map(r => JSON.parse(r.data)); }
+  serverCopy() { return this.db.prepare('SELECT data FROM server').all().map(r => JSON.parse(r.data)); }
   get(id) { const r = this.db.prepare('SELECT data FROM tasks WHERE id = ?').get(id); return r ? JSON.parse(r.data) : null; }
   ops() { return this.db.prepare('SELECT * FROM outbox ORDER BY seq').all().map(o => ({ ...o, payload: JSON.parse(o.payload) })); }
   pendingIds() { return new Set(this.db.prepare('SELECT DISTINCT task_id FROM outbox').all().map(r => r.task_id)); }
@@ -63,7 +66,7 @@ class Store {
       this.setMeta('min_local_id', id);
       const t = M.newTask(id, fields);
       this.put(t);
-      this.enqueue('create', id, { fields });
+      this.enqueue('create', id, { fields, key: crypto.randomUUID() }); // the key makes a retried POST safe
       return t;
     });
   }
@@ -80,7 +83,7 @@ class Store {
       this.put(next);
       const last = this.lastOp(id);
       if (last && !last.inflight && last.kind === 'create') {
-        this.rewriteOp(last.seq, { fields: { ...last.payload.fields, ...changed } });
+        this.rewriteOp(last.seq, { ...last.payload, fields: { ...last.payload.fields, ...changed } });
       } else if (last && !last.inflight && last.kind === 'update') {
         const base = { ...last.payload.base };
         for (const k of Object.keys(changed)) if (!(k in base)) base[k] = t[k] ?? null;
@@ -105,7 +108,7 @@ class Store {
       if (last && !last.inflight && last.kind === 'create') {
         const f = { ...last.payload.fields };
         for (const k of ['scheduled_date', 'deadline_date', 'done']) if (next[k] != null || k in f) f[k] = next[k];
-        this.rewriteOp(last.seq, { fields: f });
+        this.rewriteOp(last.seq, { ...last.payload, fields: f });
       } else {
         this.enqueue('complete', id, { repeat_count: t.repeat_count || 0 });
       }
@@ -148,6 +151,8 @@ class Store {
   // Replace the local copy with the server's, except tasks that still have unsent changes.
   replaceAll(serverTasks) {
     this.tx(() => {
+      this.db.exec('DELETE FROM server');
+      for (const t of serverTasks) this.db.prepare('INSERT INTO server (id, data) VALUES (?, ?)').run(t.id, JSON.stringify(t));
       const pending = this.pendingIds();
       for (const { id } of this.db.prepare('SELECT id FROM tasks').all()) if (!pending.has(id)) this.db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
       for (const t of serverTasks) if (!pending.has(t.id)) this.put(t);

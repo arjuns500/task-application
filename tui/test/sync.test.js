@@ -140,17 +140,80 @@ test('offline: sync fails, nothing is lost, and the next sync sends it', async (
   assert.ok(byTitle(s, 'Written on a plane').id > 0);
 });
 
-test('a create whose response was lost is adopted, not duplicated', async () => {
+test('a create whose response was lost is not duplicated (Idempotency-Key)', async () => {
   const s = client();
   const t = s.create({ title: 'Lost response' });
   const op = s.ops()[0];
-  s.markSent(op.seq);                                         // we sent it...
-  const made = await api.req('POST', '/api/tasks', { title: 'Lost response' }); // ...and the server did make it
+  s.markSent(op.seq);                                         // we sent it, the server made it, the reply never came
+  const made = await api.req('POST', '/api/tasks', op.payload.fields, { 'Idempotency-Key': op.payload.key });
   await sync(s, api, TODAY);
-  const all = await api.req('GET', '/api/tasks?q=Lost%20response');
-  assert.strictEqual(all.length, 1);
+  assert.strictEqual((await api.req('GET', '/api/tasks?q=Lost%20response')).length, 1);
   assert.strictEqual(s.get(made.id).title, 'Lost response');
   assert.strictEqual(s.get(t.id), null);
+});
+
+// An Api that behaves like a server from before /api/sync, Idempotency-Key and If-Match.
+class LegacyApi extends Api {
+  req(method, p, body, headers = {}) {
+    if (p.startsWith('/api/sync')) return Promise.reject(Object.assign(new Error('not found'), { status: 404 }));
+    const strip = t => (Array.isArray(t) ? t.map(strip) : t && typeof t === 'object' ? (({ version, seq, ...rest }) => rest)(t) : t);
+    return super.req(method, p, body).then(strip);
+  }
+}
+
+test('older servers: full pulls, and lost creates are matched by title', async () => {
+  const s = client();
+  const legacy = new LegacyApi({ server: api.base });
+  const gone = await api.req('POST', '/api/tasks', { title: 'Legacy gone' });
+  await sync(s, legacy, TODAY);
+  assert.ok(s.get(gone.id));
+  await api.req('DELETE', `/api/tasks/${gone.id}`);
+  const t = s.create({ title: 'Legacy lost response' });
+  s.markSent(s.ops()[0].seq);
+  const made = await api.req('POST', '/api/tasks', { title: 'Legacy lost response' });
+  const r = await sync(s, legacy, TODAY);
+  assert.strictEqual(r.incremental, false);
+  assert.strictEqual((await api.req('GET', '/api/tasks?q=Legacy%20lost')).length, 1);
+  assert.ok(s.get(made.id) && !s.get(t.id));
+  assert.strictEqual(s.get(gone.id), null);
+});
+
+test('a task changed between the snapshot and the write is retried against the new version', async () => {
+  const s = client();
+  const made = await api.req('POST', '/api/tasks', { title: 'Raced' });
+  await sync(s, api, TODAY);
+  s.update(made.id, { notes: 'from laptop' });
+  // the phone changes the same task right after our snapshot, just before our PATCH lands
+  let raced = false;
+  const racy = new (class extends Api {
+    async req(method, p, body, headers) {
+      if (method === 'PATCH' && !raced) { raced = true; await api.req('PATCH', `/api/tasks/${made.id}`, { priority: 'high' }); }
+      return super.req(method, p, body, headers);
+    }
+  })({ server: api.base });
+  await sync(s, racy, TODAY);
+  const remote = await server(made.id);
+  assert.ok(raced);
+  assert.strictEqual(remote.notes, 'from laptop');
+  assert.strictEqual(remote.priority, 'high');
+  assert.strictEqual(remote.version, 3);
+});
+
+test('syncs are incremental, and a different or restored server database triggers a full resync', async () => {
+  const s = client();
+  await sync(s, api, TODAY);
+  const cursor = s.getMeta('cursor');
+  const t = await api.req('POST', '/api/tasks', { title: 'After cursor' });
+  const r = await sync(s, api, TODAY);
+  assert.ok(r.incremental && s.getMeta('cursor') > cursor);
+  assert.ok(s.get(t.id));
+  // pretend the server was swapped for another one: the stale copy must not survive
+  s.put({ ...s.get(t.id), id: 999999, title: 'Only in the old database' });
+  s.replaceAll([...s.serverCopy(), s.get(999999)]);
+  s.setMeta('db_id', 'some-other-database');
+  await sync(s, api, TODAY);
+  assert.strictEqual(s.get(999999), null);
+  assert.ok(s.get(t.id));
 });
 
 test('a change the server rejects is dropped and logged, the rest still syncs', async () => {

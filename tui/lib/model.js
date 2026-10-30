@@ -81,42 +81,7 @@ function matches(t, f = {}) {
   return true;
 }
 
-// Org-style agenda over [from, to]; a port of agenda() in server.js.
-function agenda(tasks, from, to, today, defaultWarn = 14) {
-  const days = new Map();
-  for (let d = from; d <= to; d = S.addDays(d, 1)) days.set(d, new Map());
-  const put = (date, task, entry) => {
-    const day = days.get(date);
-    if (!day) return;
-    const prev = day.get(task.id);
-    if (!prev || (entry.kind === 'deadline' && prev.kind !== 'deadline')) day.set(task.id, { ...entry, task });
-  };
-  for (const task of tasks) {
-    const { scheduled_date: sd, deadline_date: dd } = task;
-    if (sd) {
-      put(sd, task, { kind: 'scheduled', carried: false, days: 0 });
-      if (!task.done) {
-        for (const d of S.occurrences(sd, task.repeat, from, to)) if (d > today) put(d, task, { kind: 'scheduled', carried: false, days: 0, projected: true });
-        if (sd < today) put(today, task, { kind: 'scheduled', carried: true, days: S.diffDays(sd, today) });
-      }
-    }
-    if (dd) {
-      put(dd, task, { kind: 'deadline', carried: false, days: 0 });
-      if (!task.done) {
-        for (const d of S.occurrences(dd, task.repeat, from, to)) if (d > today) put(d, task, { kind: 'deadline', carried: false, days: 0, projected: true });
-        const until = S.diffDays(today, dd);
-        const warn = task.warning_days ?? defaultWarn;
-        if (dd !== today && until <= warn && (sd == null || sd <= today || until < 0))
-          put(today, task, { kind: 'deadline', carried: true, days: until });
-      }
-    }
-  }
-  const order = e => [e.task.done ? 1 : 0,
-    e.kind === 'scheduled' && e.task.scheduled_time && !e.carried ? e.task.scheduled_time : '99',
-    e.kind === 'deadline' ? (e.carried ? e.days : 0) : 1000 - (e.carried ? e.days : 0),
-    RANK[e.task.priority] ?? 1, e.task.id];
-  const cmp = (a, b) => { const x = order(a), y = order(b); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1; return 0; };
-  return [...days].map(([date, m]) => ({ date, items: [...m.values()].sort(cmp) }));
-}
+// Org-style agenda, the same code the server's /api/agenda runs.
+const agenda = S.agenda;
 
 module.exports = { EDITABLE, DEFAULTS, same, newTask, applyFields, complete, toQuickAdd, parseEdit, sortTasks, matches, agenda };

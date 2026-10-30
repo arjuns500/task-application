@@ -59,6 +59,9 @@ function migrate() {
   }
   if (!db.prepare("SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'tags'").get())
     db.exec("ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'");
+  // For sync clients: version goes up on every change to a task (If-Match); seq orders all changes (GET /api/sync).
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'version'").get())
+    db.exec('ALTER TABLE tasks ADD COLUMN version INTEGER NOT NULL DEFAULT 1; ALTER TABLE tasks ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;');
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tasks_sched ON tasks(scheduled_date);
     CREATE INDEX IF NOT EXISTS idx_tasks_deadline ON tasks(deadline_date);
@@ -76,7 +79,22 @@ function migrate() {
       filters  TEXT NOT NULL DEFAULT '{}', -- JSON, see validateFilters
       position INTEGER NOT NULL DEFAULT 0
     );
-    PRAGMA user_version = 3;`);
+    CREATE INDEX IF NOT EXISTS idx_tasks_seq ON tasks(seq);
+    CREATE TABLE IF NOT EXISTS deleted_tasks (    -- tombstones, so sync clients learn about deletes
+      id         INTEGER PRIMARY KEY,
+      seq        INTEGER NOT NULL,
+      deleted_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_deleted_seq ON deleted_tasks(seq);
+    CREATE TABLE IF NOT EXISTS idempotency_keys ( -- POST /api/tasks retries with the same key return the same task
+      key        TEXT PRIMARY KEY,
+      task_id    INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    PRAGMA user_version = 4;`);
+  // Identifies this database, so a sync client notices a restored backup or a different server.
+  db.prepare('INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)').run('db_id', crypto.randomUUID());
 }
 
 const PRIORITIES = ['low', 'normal', 'high'];
@@ -85,7 +103,7 @@ const DEFAULTS = { notes: '', scheduled_date: null, scheduled_time: null, deadli
 const SCOPES = ['all', 'inbox', 'dated'];
 
 class HttpError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, extra) { super(message); this.status = status; this.extra = extra; }
 }
 
 function toTask(row) {
@@ -237,10 +255,15 @@ function dbValue(k, v) {
   return v ?? null;
 }
 
+const nextSeq = () => db.prepare(`SELECT COALESCE(MAX(s), 0) + 1 AS s FROM
+  (SELECT MAX(seq) AS s FROM tasks UNION ALL SELECT MAX(seq) FROM deleted_tasks)`).get().s;
+
 function save(id, next, completion) {
-  const cols = [...FIELDS, 'updated_at', 'completed_at', 'repeat_count'];
+  const cols = [...FIELDS, 'updated_at', 'completed_at', 'repeat_count', 'version', 'seq'];
   db.exec('BEGIN');
   try {
+    next.version = (next.version || 0) + 1;
+    next.seq = nextSeq();
     if (id == null) {
       cols.push('created_at');
       const r = db.prepare(`INSERT INTO tasks (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
@@ -258,14 +281,22 @@ function save(id, next, completion) {
 
 function createTask(body, today) {
   const t = validate(body, false);
-  const base = { ...DEFAULTS, done: false, repeat_count: 0, created_at: new Date().toISOString() };
+  const base = { ...DEFAULTS, done: false, repeat_count: 0, version: 0, created_at: new Date().toISOString() };
   const { next, completion } = apply(base, t, today);
   return save(null, next, completion);
 }
 
-function updateTask(id, body, partial, today) {
+// If-Match: "<version>" makes a write fail with 412 (and the current task) if someone changed the task since.
+function checkVersion(task, ifMatch) {
+  if (ifMatch == null || ifMatch === '*') return;
+  const want = String(ifMatch).replace(/^W\//, '').replace(/"/g, '').trim();
+  if (want !== String(task.version)) throw new HttpError(412, 'task was changed since you read it', { task });
+}
+
+function updateTask(id, body, partial, today, ifMatch) {
   const existing = toTask(getStmt.get(id));
   if (!existing) throw new HttpError(404, 'task not found');
+  checkVersion(existing, ifMatch);
   let t = validate(body, partial);
   if (!partial) t = { ...DEFAULTS, ...t }; // PUT replaces: unspecified fields reset to defaults
   const { next, completion } = apply(existing, t, today);
@@ -292,55 +323,13 @@ function listTasks(q) {
   return db.prepare(sql).all(...params).map(toTask);
 }
 
-// ---- Agenda (org-mode style) ----
-// For each day in [from, to]:
-//  - tasks scheduled that day (including future repeats)
-//  - deadlines that day (including future repeats)
-//  - on today only: unfinished tasks scheduled in the past ("carried", with days since),
-//    and deadlines within their warning period or overdue.
+// ---- Agenda (org-mode style): see agenda() in public/shared.js ----
 function agenda(from, to, today, filters = {}) {
   if (!S.isValidDate(from) || !S.isValidDate(to)) throw new HttpError(400, 'from and to must be YYYY-MM-DD');
   if (to < from || S.diffDays(from, to) > 366) throw new HttpError(400, 'range must be 0-366 days');
-  const days = new Map();
-  for (let d = from; d <= to; d = S.addDays(d, 1)) days.set(d, new Map());
-  const put = (date, task, entry) => {
-    const day = days.get(date);
-    if (!day) return;
-    const prev = day.get(task.id);
-    if (!prev || (entry.kind === 'deadline' && prev.kind !== 'deadline')) day.set(task.id, { ...entry, kind: entry.kind, task });
-  };
-
   const fw = filterSql(filters);
   const rows = db.prepare(`SELECT * FROM tasks WHERE (scheduled_date IS NOT NULL OR deadline_date IS NOT NULL)${fw.where.map(w => ' AND ' + w).join('')}`).all(...fw.params);
-  for (const task of rows.map(toTask)) {
-    const { scheduled_date: sd, deadline_date: dd } = task;
-    if (sd) {
-      put(sd, task, { kind: 'scheduled', carried: false, days: 0 });
-      if (!task.done) {
-        for (const d of S.occurrences(sd, task.repeat, from, to)) if (d > today) put(d, task, { kind: 'scheduled', carried: false, days: 0, projected: true });
-        if (sd < today) put(today, task, { kind: 'scheduled', carried: true, days: S.diffDays(sd, today) });
-      }
-    }
-    if (dd) {
-      put(dd, task, { kind: 'deadline', carried: false, days: 0 });
-      if (!task.done) {
-        for (const d of S.occurrences(dd, task.repeat, from, to)) if (d > today) put(d, task, { kind: 'deadline', carried: false, days: 0, projected: true });
-        const until = S.diffDays(today, dd); // positive: due in N days; negative: overdue
-        const warn = task.warning_days ?? DEFAULT_WARNING_DAYS;
-        if (dd !== today && until <= warn && (sd == null || sd <= today || until < 0))
-          put(today, task, { kind: 'deadline', carried: true, days: until });
-      }
-    }
-  }
-
-  const rank = { high: 0, normal: 1, low: 2 };
-  const order = e => [
-    e.task.done ? 1 : 0,
-    e.kind === 'scheduled' && e.task.scheduled_time && !e.carried ? e.task.scheduled_time : '99',
-    e.kind === 'deadline' ? (e.carried ? e.days : 0) : 1000 - (e.carried ? e.days : 0),
-    rank[e.task.priority], e.task.id];
-  const cmp = (a, b) => { const x = order(a), y = order(b); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1; return 0; };
-  return { today, from, to, days: [...days].map(([date, m]) => ({ date, items: [...m.values()].sort(cmp) })) };
+  return { today, from, to, days: S.agenda(rows.map(toTask), from, to, today, DEFAULT_WARNING_DAYS) };
 }
 
 // ---- Saved views ----
@@ -437,6 +426,22 @@ function serveStatic(res, pathname) {
   });
 }
 
+// Idempotency-Key: a retried create (say, after a dropped connection) returns the task the first try made.
+function idempotent(req, res, create) {
+  const key = req.headers['idempotency-key'];
+  if (!key) return send(res, 201, create());
+  if (key.length > 200) throw new HttpError(400, 'Idempotency-Key is too long');
+  const prev = db.prepare('SELECT task_id FROM idempotency_keys WHERE key = ?').get(key);
+  if (prev) {
+    const t = toTask(getStmt.get(prev.task_id));
+    return t ? send(res, 200, t) : send(res, 410, { error: 'the task created with this key has since been deleted', id: prev.task_id });
+  }
+  const t = create();
+  db.prepare("DELETE FROM idempotency_keys WHERE created_at < ?").run(new Date(Date.now() - 30 * 864e5).toISOString());
+  db.prepare('INSERT INTO idempotency_keys (key, task_id, created_at) VALUES (?, ?, ?)').run(key, t.id, new Date().toISOString());
+  return send(res, 201, t);
+}
+
 async function handle(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const { pathname } = url;
@@ -452,7 +457,10 @@ async function handle(req, res) {
 
   if (pathname === '/api/tasks') {
     if (req.method === 'GET') return send(res, 200, listTasks(Object.fromEntries(url.searchParams)));
-    if (req.method === 'POST') return send(res, 201, createTask(await readJson(req), todayFrom(url)));
+    if (req.method === 'POST') {
+      const body = await readJson(req);
+      return idempotent(req, res, () => createTask(body, todayFrom(url)));
+    }
     return send(res, 405, { error: 'method not allowed' });
   }
 
@@ -468,7 +476,22 @@ async function handle(req, res) {
     const today = todayFrom(url);
     const parsed = S.parseQuickAdd(text, today);
     if (!parsed.title) parsed.title = text.trim();
-    return send(res, 201, createTask(parsed, today));
+    return idempotent(req, res, () => createTask(parsed, today));
+  }
+
+  // Change feed for sync clients: everything changed or deleted after `since` (a cursor from an earlier call).
+  // Without `since`, or if the cursor doesn't belong to this database, returns every task with full: true.
+  if (pathname === '/api/sync' && req.method === 'GET') {
+    const dbId = db.prepare("SELECT value FROM meta WHERE key = 'db_id'").get().value;
+    const cursor = nextSeq() - 1;
+    const sinceRaw = url.searchParams.get('since');
+    if (sinceRaw != null && !/^\d+$/.test(sinceRaw)) throw new HttpError(400, 'since must be a cursor from an earlier sync');
+    const since = sinceRaw == null ? null : Number(sinceRaw);
+    const full = since == null || since > cursor || (url.searchParams.get('db_id') || dbId) !== dbId;
+    const tasks = (full ? db.prepare('SELECT * FROM tasks ORDER BY id').all() : db.prepare('SELECT * FROM tasks WHERE seq > ? ORDER BY id').all(since)).map(toTask);
+    const deleted = full ? [] : db.prepare('SELECT id FROM deleted_tasks WHERE seq > ? ORDER BY id').all(since).map(r => r.id);
+    const views = db.prepare('SELECT * FROM views ORDER BY position, id').all().map(toView);
+    return send(res, 200, { db_id: dbId, cursor, full, tasks, deleted, views });
   }
 
   if (pathname === '/api/agenda' && req.method === 'GET') {
@@ -516,15 +539,26 @@ async function handle(req, res) {
   m = pathname.match(/^\/api\/tasks\/(\d+)$/);
   if (m) {
     const id = Number(m[1]);
+    const etag = t => ({ ETag: `"${t.version}"` });
     if (req.method === 'GET') {
       const t = toTask(getStmt.get(id));
-      return t ? send(res, 200, t) : send(res, 404, { error: 'task not found' });
+      return t ? send(res, 200, t, etag(t)) : send(res, 404, { error: 'task not found' });
     }
-    if (req.method === 'PATCH') return send(res, 200, updateTask(id, await readJson(req), true, todayFrom(url)));
-    if (req.method === 'PUT') return send(res, 200, updateTask(id, await readJson(req), false, todayFrom(url)));
+    if (req.method === 'PATCH' || req.method === 'PUT') {
+      const t = updateTask(id, await readJson(req), req.method === 'PATCH', todayFrom(url), req.headers['if-match']);
+      return send(res, 200, t, etag(t));
+    }
     if (req.method === 'DELETE') {
-      const r = db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
-      return r.changes ? send(res, 204) : send(res, 404, { error: 'task not found' });
+      const t = toTask(getStmt.get(id));
+      if (!t) return send(res, 404, { error: 'task not found' });
+      checkVersion(t, req.headers['if-match']);
+      db.exec('BEGIN');
+      try {
+        db.prepare('INSERT OR REPLACE INTO deleted_tasks (id, seq, deleted_at) VALUES (?, ?, ?)').run(id, nextSeq(), new Date().toISOString());
+        db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return send(res, 204);
     }
     return send(res, 405, { error: 'method not allowed' });
   }
@@ -536,7 +570,7 @@ async function handle(req, res) {
 
 const server = http.createServer((req, res) => {
   handle(req, res).catch(err => {
-    if (err instanceof HttpError) return send(res, err.status, { error: err.message });
+    if (err instanceof HttpError) return send(res, err.status, { error: err.message, ...err.extra });
     console.error(err);
     send(res, 500, { error: 'internal error' });
   });

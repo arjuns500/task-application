@@ -191,3 +191,54 @@ test('tags, filters and saved views', async () => {
   r = await req('GET', '/api/tags');
   assert.deepStrictEqual(r.body.find(t => t.tag === 'work'), { tag: 'work', count: 2, open: 2 });
 });
+
+test('sync feed: changes and deletes since a cursor', async () => {
+  let r = await req('GET', '/api/sync');
+  assert.strictEqual(r.body.full, true);
+  const { cursor, db_id } = r.body;
+  assert.ok(Number.isInteger(cursor) && db_id);
+
+  const a = (await req('POST', '/api/tasks', { title: 'feed-a' })).body;
+  const b = (await req('POST', '/api/tasks', { title: 'feed-b' })).body;
+  await req('PATCH', `/api/tasks/${a.id}`, { notes: 'changed' });
+  await req('DELETE', `/api/tasks/${b.id}`);
+  r = await req('GET', `/api/sync?since=${cursor}&db_id=${db_id}`);
+  assert.strictEqual(r.body.full, false);
+  assert.deepStrictEqual(r.body.tasks.map(t => [t.title, t.notes]), [['feed-a', 'changed']]);
+  assert.deepStrictEqual(r.body.deleted, [b.id]);
+  assert.ok(Array.isArray(r.body.views));
+
+  r = await req('GET', `/api/sync?since=${r.body.cursor}&db_id=${db_id}`);
+  assert.deepStrictEqual([r.body.tasks, r.body.deleted], [[], []]);
+  // a cursor from another database (or from the future, say after restoring a backup) gets everything
+  assert.strictEqual((await req('GET', `/api/sync?since=${cursor}&db_id=other`)).body.full, true);
+  assert.strictEqual((await req('GET', `/api/sync?since=999999999`)).body.full, true);
+  assert.strictEqual((await req('GET', '/api/sync?since=abc')).status, 400);
+});
+
+test('Idempotency-Key: a retried create returns the same task', async () => {
+  const key = { 'Idempotency-Key': 'test-key-1' };
+  const first = await req('POST', '/api/tasks', { title: 'Once' }, key);
+  assert.strictEqual(first.status, 201);
+  const again = await req('POST', '/api/tasks', { title: 'Once' }, key);
+  assert.strictEqual(again.status, 200);
+  assert.strictEqual(again.body.id, first.body.id);
+  assert.strictEqual((await req('GET', '/api/tasks?q=Once')).body.length, 1);
+  await req('DELETE', `/api/tasks/${first.body.id}`);
+  assert.strictEqual((await req('POST', '/api/tasks', { title: 'Once' }, key)).status, 410);
+  const cap = await req('POST', '/api/capture', 'Captured once @tom', { 'Content-Type': 'text/plain', 'Idempotency-Key': 'cap-1' });
+  assert.strictEqual((await req('POST', '/api/capture', 'Captured once @tom', { 'Content-Type': 'text/plain', 'Idempotency-Key': 'cap-1' })).body.id, cap.body.id);
+});
+
+test('If-Match: writes against a stale version fail with 412 and the current task', async () => {
+  const t = (await req('POST', '/api/tasks', { title: 'Versioned' })).body;
+  assert.strictEqual(t.version, 1);
+  let r = await req('PATCH', `/api/tasks/${t.id}`, { notes: 'v2' }, { 'If-Match': '"1"' });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.version, 2);
+  r = await req('PATCH', `/api/tasks/${t.id}`, { notes: 'stale' }, { 'If-Match': '"1"' });
+  assert.strictEqual(r.status, 412);
+  assert.strictEqual(r.body.task.notes, 'v2');
+  assert.strictEqual((await req('DELETE', `/api/tasks/${t.id}`, undefined, { 'If-Match': '1' })).status, 412);
+  assert.strictEqual((await req('DELETE', `/api/tasks/${t.id}`, undefined, { 'If-Match': '2' })).status, 204);
+});

@@ -50,22 +50,17 @@ The status line shows the sync state and how many changes are waiting. Tasks wit
 
 ## How sync works
 
-It works against the server's existing REST API; no server changes needed.
-
-- **Local store.** `tasks` holds your copy of every task (the server's JSON as-is, so new fields such as tags come along). `outbox` holds changes not yet sent. Tasks created offline get a negative id until the server assigns one.
-- **A sync** pulls every task (`GET /api/tasks`) and the saved views, sends the outbox in order against that snapshot, then makes the snapshot your local copy (keeping anything you changed while the sync ran).
+- **Local store.** `tasks` holds your copy of every task (the server's JSON as-is, so new fields such as tags come along), `server` the server's version as of the last sync, and `outbox` the changes not yet sent. Tasks created offline get a negative id until the server assigns one.
+- **A sync** asks `GET /api/sync?since=<cursor>` for only what changed since last time (including deletes), sends the outbox in order against that snapshot, then makes the snapshot your local copy (keeping anything you changed while the sync ran). If the server's database is a different one, or was restored from a backup, the server says so and the client does a full resync.
 - **Edits** are sent as `PATCH` with only the fields you changed. Each queued edit remembers what each field was before you changed it, so the sync can tell three cases apart: only you changed it (yours is sent), only the server changed it (theirs is kept), or both did. In that last case **the later edit wins**, comparing your edit time with the server's `updated_at`, and the outcome goes in the sync log. Different fields changed on different devices merge cleanly.
+- **Writes are conditional.** Every `PATCH` carries `If-Match` with the task version the merge was based on. If someone changed the task in the meantime, the server answers 412 with the current task and the client redoes the merge against it.
 - **Completing** is its own kind of change because it isn't idempotent: completing a repeating task twice advances it twice. It records the `repeat_count` you completed it at, and is skipped (and logged) if the task was completed elsewhere in the meantime.
 - **Deletes** win over edits on the other side: deleting here removes it on the server, and an edit to a task someone deleted on the server is dropped and logged.
-- **Creates** whose response was lost (connection dropped mid-request) are matched to the task the server made, by title and time, instead of being sent twice.
+- **Creates** carry an `Idempotency-Key`, so if the connection drops after the server made the task, the retry gets that same task back instead of a duplicate.
 - Network errors, timeouts, 5xx and 401 leave the outbox untouched for the next try. A change the server rejects with 4xx (say, an invalid date) is dropped and logged so it can't block the queue.
+- **Older servers** (without `/api/sync`) still work: the client falls back to fetching every task and matching lost creates by title and time.
 
-### Server additions that would make it better (not done yet)
-
-- `GET /api/tasks?updated_since=<time>` plus tombstones for deleted tasks, so a sync fetches only what changed instead of every task. Full pulls are fine at a few thousand tasks.
-- An idempotency key on `POST /api/tasks` (a client-generated id), replacing the title-and-time match for lost responses.
-- Conditional `PATCH` (`If-Unmodified-Since`, or an expected `updated_at` that returns 409), so conflict checks are atomic instead of comparing against the snapshot from the start of the sync.
-- Moving `agenda()` from `server.js` into `public/shared.js`. The TUI has a copy for offline use; a test checks both give the same result.
+The agenda is `agenda()` from `public/shared.js`, the same code behind `/api/agenda`, so it looks the same offline.
 
 ## Limits
 

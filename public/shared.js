@@ -141,6 +141,52 @@
     return out;
   }
 
+  // ---- Agenda (org-mode style) ----
+  // For each day in [from, to]:
+  //  - tasks scheduled that day (including future repeats)
+  //  - deadlines that day (including future repeats)
+  //  - on today only: unfinished tasks scheduled in the past ("carried", with days since),
+  //    and deadlines within their warning period or overdue.
+  // Used by the server's /api/agenda and by the offline terminal client.
+  function agenda(tasks, from, to, today, defaultWarningDays = 14) {
+    const days = new Map();
+    for (let d = from; d <= to; d = addDays(d, 1)) days.set(d, new Map());
+    const put = (date, task, entry) => {
+      const day = days.get(date);
+      if (!day) return;
+      const prev = day.get(task.id);
+      if (!prev || (entry.kind === 'deadline' && prev.kind !== 'deadline')) day.set(task.id, { ...entry, task });
+    };
+    for (const task of tasks) {
+      const { scheduled_date: sd, deadline_date: dd } = task;
+      if (sd) {
+        put(sd, task, { kind: 'scheduled', carried: false, days: 0 });
+        if (!task.done) {
+          for (const d of occurrences(sd, task.repeat, from, to)) if (d > today) put(d, task, { kind: 'scheduled', carried: false, days: 0, projected: true });
+          if (sd < today) put(today, task, { kind: 'scheduled', carried: true, days: diffDays(sd, today) });
+        }
+      }
+      if (dd) {
+        put(dd, task, { kind: 'deadline', carried: false, days: 0 });
+        if (!task.done) {
+          for (const d of occurrences(dd, task.repeat, from, to)) if (d > today) put(d, task, { kind: 'deadline', carried: false, days: 0, projected: true });
+          const until = diffDays(today, dd); // positive: due in N days; negative: overdue
+          const warn = task.warning_days ?? defaultWarningDays;
+          if (dd !== today && until <= warn && (sd == null || sd <= today || until < 0))
+            put(today, task, { kind: 'deadline', carried: true, days: until });
+        }
+      }
+    }
+    const rank = { high: 0, normal: 1, low: 2 };
+    const order = e => [
+      e.task.done ? 1 : 0,
+      e.kind === 'scheduled' && e.task.scheduled_time && !e.carried ? e.task.scheduled_time : '99',
+      e.kind === 'deadline' ? (e.carried ? e.days : 0) : 1000 - (e.carried ? e.days : 0),
+      rank[e.task.priority], e.task.id];
+    const cmp = (a, b) => { const x = order(a), y = order(b); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1; return 0; };
+    return [...days].map(([date, m]) => ({ date, items: [...m.values()].sort(cmp) }));
+  }
+
   return { DATE_RE, TIME_RE, REPEAT_RE, localToday, isValidDate, addDays, addMonths, addInterval, diffDays,
-           parseRepeat, nextRepeat, occurrences, describeRepeat, normalizeTag, parseQuickAdd };
+           parseRepeat, nextRepeat, occurrences, describeRepeat, normalizeTag, parseQuickAdd, agenda };
 });

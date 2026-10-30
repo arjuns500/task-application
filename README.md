@@ -89,7 +89,7 @@ A task looks like:
   "id": 1, "title": "Pay rent", "notes": "",
   "scheduled_date": "2026-11-01", "scheduled_time": null,
   "deadline_date": "2026-11-05", "warning_days": 3, "repeat": "+1m",
-  "priority": "high", "done": false, "repeat_count": 4, "tags": ["home", "bills"],
+  "priority": "high", "done": false, "repeat_count": 4, "tags": ["home", "bills"], "version": 7,
   "created_at": "...", "updated_at": "...", "completed_at": "..."
 }
 ```
@@ -114,8 +114,17 @@ A task looks like:
 | `DELETE` | `/api/tasks/:id` | |
 | `GET`    | `/calendar.ics` | iCalendar feed of dated tasks |
 | `GET`    | `/api/health` | Health check |
+| `GET`    | `/api/sync` | Change feed for sync clients, see below |
 
 `/api/tasks` and `/api/agenda` accept view filters as query parameters: `view=<id>` (a saved view), and/or `tag=a,b`, `not_tag=c`, `priority=high,normal`, `q=text`, `scope=inbox|dated`.
+
+### Sync clients
+
+Clients that keep their own copy (like the [terminal client](tui/README.md)) can use:
+
+- **`GET /api/sync?since=<cursor>&db_id=<id>`** returns `{db_id, cursor, full, tasks, deleted, views}`: tasks changed after `cursor` and ids deleted since. Keep the `cursor` and `db_id` for next time. Without `since`, or when the cursor belongs to another database (or a restored backup), it returns every task with `full: true`; replace your copy.
+- **`Idempotency-Key: <unique string>`** on `POST /api/tasks` or `/api/capture`: a retry with the same key returns the task the first request made (200) instead of creating another. If that task was deleted since, it returns 410.
+- **`If-Match: "<version>"`** on `PATCH`, `PUT` or `DELETE /api/tasks/:id`: every task has a `version` that goes up with each change (also sent as `ETag`). If it no longer matches, the write is refused with 412 and the current task as `{"error": ..., "task": {...}}`.
 
 Examples:
 
